@@ -1,317 +1,298 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
-from pydantic import BaseModel
-import uuid
 import os
-from datetime import datetime
-from typing import Dict, Any, List, Optional
-import requests
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from groq import Groq
+from github import Github
 import logging
-import json
-import redis
-import tempfile
-import shutil
-import subprocess
-import time
+from typing import Optional, List
+from dotenv import load_dotenv
 
-# -------------------------
-# LOGGING
-# -------------------------
+# Load environment variables from .env file
+load_dotenv()
+
+# Configure logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("codebase-review")
+logger = logging.getLogger(__name__)
 
-# -------------------------
-# FASTAPI INIT
-# -------------------------
-app = FastAPI(title="AI Codebase Review Agent (Repo)")
+# Check for required environment variables
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
-from fastapi.middleware.cors import CORSMiddleware
+if not GROQ_API_KEY:
+    raise ValueError("GROQ_API_KEY environment variable is not set. Please set it in .env file or export it.")
 
-origins = [
-    "http://localhost:3000",
-    "https://code-bot-rho.vercel.app",
-]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if not GITHUB_TOKEN:
+    raise ValueError("GITHUB_TOKEN environment variable is not set. Please set it in .env file or export it.")
 
-# -------------------------
-# REDIS INIT
-# -------------------------
-REDIS_URL = os.getenv("REDIS_URL")
-redis_client = None
-if REDIS_URL:
+app = FastAPI(title="Codebase Analysis Agent", version="1.0.0")
+
+# Initialize clients
+groq_client = Groq(api_key=GROQ_API_KEY)
+github_client = Github(GITHUB_TOKEN)
+
+class AnalysisRequest(BaseModel):
+    repository: str
+    type: str = "general"
+
+class AnalysisResponse(BaseModel):
+    success: bool
+    repository: str
+    analysis_type: str
+    analysis: str
+    files_analyzed: int
+    stars: int
+    language: Optional[str]
+
+def parse_repository_name(repo_input: str) -> str:
+    """Parse repository name from various input formats"""
+    # Remove trailing slashes
+    repo_input = repo_input.rstrip('/')
+    
+    # If it's a URL, extract owner/repo
+    if 'github.com' in repo_input:
+        parts = repo_input.split('github.com/')
+        if len(parts) > 1:
+            return parts[1]
+    
+    # If it already looks like owner/repo, return as is
+    if '/' in repo_input and not repo_input.startswith('http'):
+        return repo_input
+    
+    # Otherwise return as is and let it fail with a clear error
+    return repo_input
+
+def get_repository_structure(repo, path="", max_depth=3, current_depth=0) -> List[str]:
+    """Recursively get repository structure"""
+    if current_depth >= max_depth:
+        return []
+    
+    structure = []
     try:
-        redis_client = redis.from_url(REDIS_URL, decode_responses=True)
-        redis_client.ping()
-        logger.info("Connected to Redis")
+        contents = repo.get_contents(path)
+        if not isinstance(contents, list):
+            contents = [contents]
+        
+        for content in contents:
+            if content.type == "dir":
+                structure.append(f"📁 {content.path}/")
+                structure.extend(get_repository_structure(repo, content.path, max_depth, current_depth + 1))
+            else:
+                size_kb = content.size / 1024
+                structure.append(f"📄 {content.path} ({size_kb:.1f}KB)")
     except Exception as e:
-        logger.error(f"Redis connection failed: {e}")
-        redis_client = None
-else:
-    logger.info("No REDIS_URL provided, using in-memory storage")
+        logger.error(f"Error reading {path}: {str(e)}")
+    
+    return structure
 
-tasks_store: Dict[str, Dict[str, Any]] = {}
+def get_key_files(repo, extensions=['.py', '.js', '.ts', '.java', '.go', '.rs', '.jsx', '.tsx']):
+    """Get content of key files from repository"""
+    key_files = []
+    
+    try:
+        contents = repo.get_contents("")
+        while contents:
+            file_content = contents.pop(0)
+            if file_content.type == "dir":
+                contents.extend(repo.get_contents(file_content.path))
+            else:
+                if any(file_content.path.endswith(ext) for ext in extensions):
+                    if file_content.size < 100000:  # Only files under 100KB
+                        try:
+                            content = file_content.decoded_content.decode('utf-8')
+                            key_files.append({
+                                'path': file_content.path,
+                                'content': content
+                            })
+                        except:
+                            pass
+                    
+                    if len(key_files) >= 10:  # Limit to 10 files
+                        break
+    except Exception as e:
+        logger.error(f"Error getting key files: {str(e)}")
+    
+    return key_files
 
-
-def save_task(task_id: str, data: Dict[str, Any]):
-    if redis_client:
+def analyze_codebase(repo_full_name: str, analysis_type: str = "general") -> dict:
+    """Analyze codebase using Groq"""
+    try:
+        # Parse repository name if URL is provided
+        repo_full_name = parse_repository_name(repo_full_name)
+        repo = github_client.get_repo(repo_full_name)
+        
+        # Get repository structure
+        structure = get_repository_structure(repo)
+        structure_text = "\n".join(structure[:100])  # Limit structure output
+        
+        # Get key files
+        key_files = get_key_files(repo)
+        files_text = "\n\n".join([
+            f"=== {f['path']} ===\n{f['content'][:2000]}"  # Limit each file to 2000 chars
+            for f in key_files
+        ])
+        
+        # Get README
+        readme_content = ""
         try:
-            redis_client.set(f"task:{task_id}", json.dumps(data), ex=7 * 24 * 3600)
-        except Exception as e:
-            logger.error(f"Redis save error: {e}")
-            tasks_store[task_id] = data
-    else:
-        tasks_store[task_id] = data
+            readme = repo.get_readme()
+            readme_content = readme.decoded_content.decode('utf-8')[:2000]
+        except:
+            pass
+        
+        # Prepare prompt based on analysis type
+        prompts = {
+            "general": "Provide a comprehensive analysis of this codebase including: architecture overview, tech stack, code quality, potential improvements, and security considerations.",
+            "security": "Perform a security analysis focusing on: potential vulnerabilities, security best practices, authentication/authorization issues, and data handling concerns.",
+            "architecture": "Analyze the architecture focusing on: design patterns, code organization, modularity, scalability, and architectural improvements.",
+            "quality": "Assess code quality focusing on: code smells, best practices adherence, maintainability, testing coverage, and refactoring suggestions.",
+            "performance": "Analyze performance aspects including: potential bottlenecks, optimization opportunities, resource usage, and scalability concerns."
+        }
+        
+        prompt = f"""Analyze this codebase:
 
+Repository: {repo_full_name}
+Description: {repo.description or 'N/A'}
 
-def get_task(task_id: str) -> Optional[Dict[str, Any]]:
-    if redis_client:
-        try:
-            raw = redis_client.get(f"task:{task_id}")
-            return json.loads(raw) if raw else None
-        except Exception as e:
-            logger.error(f"Redis get error: {e}")
-            return tasks_store.get(task_id)
-    else:
-        return tasks_store.get(task_id)
+README:
+{readme_content}
 
+Repository Structure:
+{structure_text}
 
-# -------------------------
-# REQUEST MODEL
-# -------------------------
-class RepoRequest(BaseModel):
-    repo_url: str
-    branch: str = "main"
-    github_token: Optional[str] = None
+Key Files:
+{files_text}
 
+Task: {prompts.get(analysis_type, prompts['general'])}
 
-# -------------------------
-# MAIN REVIEW AGENT
-# -------------------------
-class CodebaseReviewAgent:
-    def __init__(self, github_token: Optional[str] = None):
-        groq_api_key = os.getenv("GROQ_API_KEY")
-        if not groq_api_key:
-            raise ValueError("GROQ_API_KEY not set")
+Provide a detailed, actionable analysis."""
 
-        self.groq_client = Groq(api_key=groq_api_key)
-        self.github_token = github_token
-        self.headers = {}
-        if self.github_token:
-            self.headers["Authorization"] = f"token {self.github_token}"
-
-    def clone_repo(self, repo_url: str, branch: str) -> str:
-        tmp_dir = tempfile.mkdtemp()
-        cmd = ["git", "clone", "--depth", "1", "--branch", branch, repo_url, tmp_dir]
-        logger.info(f"Cloning {repo_url}@{branch}")
-        subprocess.run(cmd, check=True)
-        return tmp_dir
-
-    def get_code_files(self, root_path: str) -> List[str]:
-        code_files = []
-        for root, _, files in os.walk(root_path):
-            for f in files:
-                if f.endswith((".py", ".js", ".ts", ".jsx", ".tsx")):
-                    if (
-                        "__pycache__" not in root
-                        and "node_modules" not in root
-                        and "test" not in root.lower()
-                    ):
-                        code_files.append(os.path.join(root, f))
-        return code_files
-
-    def analyze_repo(self, repo_url: str, branch: str) -> Dict[str, Any]:
-        repo_path = None
-        try:
-            repo_path = self.clone_repo(repo_url, branch)
-            files = self.get_code_files(repo_path)
-
-            # Limit based on repo size
-            if len(files) > 50:
-                files = files[:25]
-            elif len(files) > 25:
-                files = files[:20]
-
-            logger.info(f"Analyzing {len(files)} files from repo")
-
-            analyzed = []
-            total_issues = 0
-            batch_size = 5
-
-            for i in range(0, len(files), batch_size):
-                batch = files[i:i + batch_size]
-                combined_code = ""
-
-                for fp in batch:
-                    try:
-                        with open(fp, "r", encoding="utf-8", errors="ignore") as f:
-                            content = f.read()
-                        combined_code += f"\n\n# FILE: {fp}\n{content}\n"
-                    except Exception as e:
-                        logger.warning(f"Skipping {fp}: {e}")
-
-                if not combined_code.strip():
-                    continue
-
-                prompt = f"""
-You are a strict senior code reviewer. Review ALL files below and report issues with file path + line numbers.
-
-Return ONLY JSON array like:
-[
-  {{
-    "file": "path/to/file.py",
-    "line": 42,
-    "type": "bug" | "style" | "performance" | "security" | "best_practice",
-    "description": "concise problem explanation",
-    "suggestion": "clear fix recommendation"
-  }}
-]
-If no issues, return [].
-
-Code:
-{combined_code}
-"""
-
-                try:
-                    resp = self.groq_client.chat.completions.create(
-                        model="llama-3.3-70b-versatile",
-                        messages=[
-                            {"role": "system", "content": "Output only valid JSON array."},
-                            {"role": "user", "content": prompt},
-                        ],
-                        temperature=0.15,
-                        max_tokens=2000,
-                        timeout=120,
-                    )
-
-                    text = resp.choices[0].message.content.strip()
-                    if text.startswith("```json"):
-                        text = text[7:]
-                    if text.endswith("```"):
-                        text = text[:-3]
-                    text = text.strip()
-
-                    issues = json.loads(text) if text else []
-                    analyzed.append({"batch": i // batch_size + 1, "issues": issues})
-                    total_issues += len(issues)
-                    logger.info(f"Batch {i // batch_size + 1}: {len(issues)} issues")
-
-                    # Prevent hitting Groq rate limits
-                    time.sleep(2)
-
-                except Exception as e:
-                    logger.error(f"Batch {i // batch_size + 1} failed: {e}")
-                    analyzed.append({"batch": i // batch_size + 1, "issues": [], "error": str(e)})
-
+        # Try multiple models in order of preference
+        models = [
+            ("llama-3.3-70b-versatile", 8000),
+            ("llama-3.1-8b-instant", 8000),
+            ("mixtral-8x7b-32768", 32768)
+        ]
+        
+        analysis = None
+        last_error = None
+        
+        for model_name, max_tokens in models:
+            try:
+                # Call Groq API
+                chat_completion = groq_client.chat.completions.create(
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": prompt,
+                        }
+                    ],
+                    model=model_name,
+                    temperature=0.5,
+                    max_tokens=max_tokens,
+                )
+                
+                analysis = chat_completion.choices[0].message.content
+                logger.info(f"Successfully used model: {model_name}")
+                break
+                
+            except Exception as model_error:
+                last_error = str(model_error)
+                logger.warning(f"Failed with {model_name}: {last_error}")
+                if "rate_limit" not in last_error.lower() and model_name == models[0][0]:
+                    # If it's not a rate limit error on first model, don't try others
+                    break
+                continue
+        
+        if not analysis:
             return {
-                "repo_url": repo_url,
-                "branch": branch,
-                "analyzed_at": datetime.utcnow().isoformat(),
-                "total_batches": len(analyzed),
-                "total_issues": total_issues,
-                "batches": analyzed,
+                "success": False,
+                "error": f"All models failed. Last error: {last_error}"
             }
-
-        finally:
-            if repo_path and os.path.exists(repo_path):
-                shutil.rmtree(repo_path, ignore_errors=True)
-
-
-# -------------------------
-# BACKGROUND WORKER
-# -------------------------
-def process_repo_analysis(task_id: str, repo_url: str, branch: str, github_token: Optional[str] = None):
-    try:
-        task = get_task(task_id)
-        if task:
-            task["status"] = "processing"
-            save_task(task_id, task)
-
-        logger.info(f"Starting analysis task {task_id}")
-        agent = CodebaseReviewAgent(github_token)
-        results = agent.analyze_repo(repo_url, branch)
-
-        task = get_task(task_id)
-        if task:
-            task["status"] = "completed"
-            task["results"] = results
-            save_task(task_id, task)
-        logger.info(f"Completed analysis task {task_id}")
-
+        
+        return {
+            "success": True,
+            "repository": repo_full_name,
+            "analysis_type": analysis_type,
+            "analysis": analysis,
+            "files_analyzed": len(key_files),
+            "stars": repo.stargazers_count,
+            "language": repo.language
+        }
+        
     except Exception as e:
-        logger.exception(f"Repo analysis failed for {task_id}: {e}")
-        task = get_task(task_id)
-        if task:
-            task["status"] = "failed"
-            task["error"] = str(e)
-            save_task(task_id, task)
-
-
-# -------------------------
-# ROUTES
-# -------------------------
-@app.post("/analyze-repo")
-async def analyze_repo(request: Request, repo_request: RepoRequest, background_tasks: BackgroundTasks):
-    task_id = str(uuid.uuid4())
-    task_data = {
-        "status": "pending",
-        "created_at": datetime.utcnow().isoformat(),
-        "repo_url": repo_request.repo_url,
-        "branch": repo_request.branch,
-    }
-    save_task(task_id, task_data)
-    background_tasks.add_task(process_repo_analysis, task_id, repo_request.repo_url, repo_request.branch, repo_request.github_token)
-    logger.info(f"Created repo analysis task {task_id}")
-    return {"task_id": task_id, "status": "pending"}
-
-
-@app.get("/status/{task_id}")
-async def get_status(task_id: str):
-    t = get_task(task_id)
-    if not t:
-        raise HTTPException(status_code=404, detail="Task not found")
-    return {
-        "task_id": task_id,
-        "status": t.get("status", "unknown"),
-        "created_at": t.get("created_at"),
-    }
-
-
-@app.get("/results/{task_id}")
-async def get_results(task_id: str):
-    t = get_task(task_id)
-    if not t:
-        raise HTTPException(status_code=404, detail="Task not found")
-    status_val = t.get("status")
-    if status_val in ("pending", "processing"):
-        raise HTTPException(status_code=202, detail=f"Task {status_val}")
-    if status_val == "failed":
-        raise HTTPException(status_code=500, detail=f"Task failed: {t.get('error')}")
-    return {"task_id": task_id, "results": t.get("results", {})}
-
+        logger.error(f"Analysis error: {str(e)}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 @app.get("/")
 async def root():
+    """Root endpoint"""
     return {
-        "message": "AI Codebase Review Agent",
-        "version": "2.0.0",
-        "storage": "Redis" if redis_client else "In-Memory",
+        "service": "Codebase Analysis Agent",
+        "version": "1.0.0",
+        "status": "running",
         "endpoints": {
-            "POST /analyze-repo": "Start full repo review",
-            "GET /status/{task_id}": "Check task status",
-            "GET /results/{task_id}": "Get analysis results",
-        },
+            "health": "/health",
+            "analyze": "/analyze",
+            "webhook": "/webhook"
+        }
     }
 
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy", "service": "codebase-analyzer"}
 
-# -------------------------
-# ENTRY POINT
-# -------------------------
+@app.post("/analyze", response_model=AnalysisResponse)
+async def analyze(request: AnalysisRequest):
+    """Main analysis endpoint"""
+    try:
+        valid_types = ['general', 'security', 'architecture', 'quality', 'performance']
+        if request.type not in valid_types:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid analysis type. Valid types: {valid_types}"
+            )
+        
+        result = analyze_codebase(request.repository, request.type)
+        
+        if result['success']:
+            return result
+        else:
+            raise HTTPException(status_code=500, detail=result.get('error', 'Analysis failed'))
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Request error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/webhook")
+async def github_webhook(request: Request):
+    """GitHub webhook endpoint for automated analysis"""
+    try:
+        event = request.headers.get('X-GitHub-Event')
+        payload = await request.json()
+        
+        if event == 'push':
+            repo_name = payload['repository']['full_name']
+            
+            # Trigger analysis on push to main/master
+            if payload['ref'] in ['refs/heads/main', 'refs/heads/master']:
+                result = analyze_codebase(repo_name, 'general')
+                logger.info(f"Automated analysis completed for {repo_name}")
+                return result
+        
+        return {"message": "Event received"}
+        
+    except Exception as e:
+        logger.error(f"Webhook error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)), reload=True)
+    port = int(os.environ.get('PORT', 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
