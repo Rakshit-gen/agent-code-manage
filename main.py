@@ -7,8 +7,8 @@ from github import Github
 import logging
 from typing import Optional, List
 from dotenv import load_dotenv
+from fastapi.middleware.cors import CORSMiddleware
 
-# Load environment variables from .env file
 load_dotenv()
 
 # Configure logging
@@ -26,6 +26,19 @@ if not GITHUB_TOKEN:
     raise ValueError("GITHUB_TOKEN environment variable is not set. Please set it in .env file or export it.")
 
 app = FastAPI(title="Codebase Analysis Agent", version="1.0.0")
+
+# Load environment variables from .env file
+origins = [
+    "http://localhost:3000",
+    "https://code-bot-rho.vercel.app",
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Initialize clients
 groq_client = Groq(api_key=GROQ_API_KEY)
