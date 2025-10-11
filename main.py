@@ -191,7 +191,7 @@ def analyze_codebase(repo_full_name: str, analysis_type: str = "general") -> dic
         
         # Prepare prompt based on analysis type
         prompts = {
-            "general": "Provide a comprehensive analysis of this codebase including: architecture overview, tech stack, code quality, potential improvements, and security considerations.",
+            "general": "Provide a comprehensive analysis of this codebase including: architecture overview, tech stack, code quality, potential improvements, and security considerations. If any section is left empty leave it empty. List only full and important stuff",
             "security": "Perform a security analysis focusing on: potential vulnerabilities, security best practices, authentication/authorization issues, and data handling concerns.",
             "architecture": "Analyze the architecture focusing on: design patterns, code organization, modularity, scalability, and architectural improvements.",
             "quality": "Assess code quality focusing on: code smells, best practices adherence, maintainability, testing coverage, and refactoring suggestions.Rate the code quality out of 100 at the top.",
