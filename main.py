@@ -214,7 +214,7 @@ Key Files:
 
 Task: {prompts.get(analysis_type, prompts['general'])}
 
-Provide a detailed, actionable analysis."""
+Provide a detailed, actionable analysis. Dont add any * to result."""
 
         # Try multiple models in order of preference (all currently active as of Oct 2025)
         models = [
