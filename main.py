@@ -1,5 +1,6 @@
 import os
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from groq import Groq
@@ -7,8 +8,8 @@ from github import Github
 import logging
 from typing import Optional, List
 from dotenv import load_dotenv
-from fastapi.middleware.cors import CORSMiddleware
 
+# Load environment variables from .env file FIRST
 load_dotenv()
 
 # Configure logging
@@ -27,14 +28,17 @@ if not GITHUB_TOKEN:
 
 app = FastAPI(title="Codebase Analysis Agent", version="1.0.0")
 
-# Load environment variables from .env file
+# CORS Configuration
 origins = [
     "http://localhost:3000",
+    "http://localhost:3001",
     "https://code-bot-rho.vercel.app",
+    "https://*.vercel.app",  # Allow all Vercel preview deployments
 ]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],  # Allow all origins for now, restrict later if needed
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
