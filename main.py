@@ -191,12 +191,44 @@ def analyze_codebase(repo_full_name: str, analysis_type: str = "general") -> dic
         
         # Prepare prompt based on analysis type
         prompts = {
-            "general": "Provide a comprehensive analysis of this codebase including: architecture overview, tech stack, code quality, potential improvements, and security considerations. If any section is left empty leave it empty. List only full and important stuff",
-            "security": "Perform a security analysis focusing on: potential vulnerabilities, security best practices, authentication/authorization issues, and data handling concerns.",
-            "architecture": "Analyze the architecture focusing on: design patterns, code organization, modularity, scalability, and architectural improvements.",
-            "quality": "Assess code quality focusing on: code smells, best practices adherence, maintainability, testing coverage, and refactoring suggestions.Rate the code quality out of 100 at the top.",
-            "performance": "Analyze performance aspects including: potential bottlenecks, optimization opportunities, resource usage, and scalability concerns."
-        }
+               "general": (
+        "Perform a comprehensive and in-depth analysis of this codebase. "
+        "Your response must cover the following sections in order: "
+        "1. Architecture Overview, 2. Tech Stack, 3. Code Quality, 4. Potential Improvements, and 5. Security Considerations. "
+        "Each section should be detailed, specific, and well-organized. "
+        "If any section lacks sufficient context or data, leave it explicitly empty instead of speculating. "
+        "Focus only on major findings and critical insights — omit trivial or generic points."
+    ),
+
+    "security": (
+        "Conduct a deep security audit of the codebase. "
+        "Evaluate potential vulnerabilities, authentication and authorization flows, data protection practices, and adherence to security best practices. "
+        "Highlight risks in API design, environment variables, database handling, and external integrations. "
+        "Prioritize concrete, high-impact findings over general advice."
+    ),
+
+    "architecture": (
+        "Analyze the software architecture of this codebase in depth. "
+        "Assess design patterns, module organization, separation of concerns, scalability, and maintainability. "
+        "Identify structural strengths and weaknesses, and suggest specific architectural improvements where applicable. "
+        "Focus on real design trade-offs and code organization, not surface-level summaries."
+    ),
+
+    "quality": (
+        "Evaluate the code quality thoroughly. "
+        "Rate the overall code quality out of 100 at the very top of your response. "
+        "Then assess readability, consistency, adherence to best practices, maintainability, and test coverage. "
+        "Identify code smells, anti-patterns, and technical debt with actionable refactoring suggestions. "
+        "Be precise and evidence-based — avoid vague or repetitive feedback."
+    ),
+
+    "performance": (
+        "Perform a detailed performance review of this codebase. "
+        "Identify potential bottlenecks, inefficient database or API calls, and opportunities for optimization. "
+        "Analyze resource utilization, scalability limits, and concurrency or caching issues if applicable. "
+        "Conclude with clear, actionable recommendations for improving runtime efficiency and scalability."
+    )
+    }
         
         prompt = f"""Analyze this codebase:
 
