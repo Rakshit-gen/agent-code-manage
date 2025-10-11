@@ -38,7 +38,7 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,  # Allow all origins for now, restrict later if needed
+    allow_origins=["*"],  # Allow all origins for now, restrict later if needed
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -102,30 +102,62 @@ def get_repository_structure(repo, path="", max_depth=3, current_depth=0) -> Lis
     
     return structure
 
-def get_key_files(repo, extensions=['.py', '.js', '.ts', '.java', '.go', '.rs', '.jsx', '.tsx']):
-    """Get content of key files from repository"""
+def get_key_files(repo, extensions=['.py', '.js', '.ts', '.java', '.go', '.rs', '.jsx', '.tsx', '.vue', '.cpp', '.c', '.rb']):
+    """Get content of key files from repository, recursively exploring all directories"""
     key_files = []
+    files_to_process = []
     
     try:
+        # Get all contents recursively
         contents = repo.get_contents("")
+        
         while contents:
             file_content = contents.pop(0)
+            
             if file_content.type == "dir":
-                contents.extend(repo.get_contents(file_content.path))
+                # Explore subdirectories (including app/, src/, components/, etc.)
+                try:
+                    contents.extend(repo.get_contents(file_content.path))
+                except Exception as e:
+                    logger.warning(f"Could not access directory {file_content.path}: {str(e)}")
             else:
+                # Check if file has relevant extension
                 if any(file_content.path.endswith(ext) for ext in extensions):
                     if file_content.size < 100000:  # Only files under 100KB
-                        try:
-                            content = file_content.decoded_content.decode('utf-8')
-                            key_files.append({
-                                'path': file_content.path,
-                                'content': content
-                            })
-                        except:
-                            pass
-                    
-                    if len(key_files) >= 10:  # Limit to 10 files
-                        break
+                        files_to_process.append(file_content)
+        
+        # Prioritize important files
+        priority_patterns = [
+            'main.', 'app.', 'index.', 'server.', 'api.',
+            'config.', 'route', 'controller', 'model',
+            'service', 'component', 'page', 'layout'
+        ]
+        
+        # Sort files by priority
+        def file_priority(file):
+            path_lower = file.path.lower()
+            for i, pattern in enumerate(priority_patterns):
+                if pattern in path_lower:
+                    return i
+            return len(priority_patterns)
+        
+        files_to_process.sort(key=file_priority)
+        
+        # Process files up to limit
+        for file_content in files_to_process[:15]:  # Increased to 15 files
+            try:
+                content = file_content.decoded_content.decode('utf-8')
+                key_files.append({
+                    'path': file_content.path,
+                    'content': content
+                })
+                logger.info(f"Analyzed file: {file_content.path}")
+            except Exception as e:
+                logger.warning(f"Could not read file {file_content.path}: {str(e)}")
+                
+            if len(key_files) >= 15:
+                break
+    
     except Exception as e:
         logger.error(f"Error getting key files: {str(e)}")
     
