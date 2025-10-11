@@ -219,7 +219,7 @@ Provide a detailed, actionable analysis."""
         # Try multiple models in order of preference
         models = [
             ("llama-3.3-70b-versatile", 8000),
-            ("llama-3.1-70b-versatile", 8000),
+            ("llama-3.1-8b-instant", 8000)
         ]
         
         analysis = None
