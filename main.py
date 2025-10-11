@@ -220,8 +220,6 @@ Provide a detailed, actionable analysis."""
         models = [
             ("llama-3.3-70b-versatile", 8000),
             ("llama-3.1-70b-versatile", 8000),
-            ("llama-3.1-8b-instant", 8000),
-            ("gemma2-9b-it", 8000)
         ]
         
         analysis = None
