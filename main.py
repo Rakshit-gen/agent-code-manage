@@ -123,7 +123,7 @@ def get_key_files(repo, extensions=['.py', '.js', '.ts', '.java', '.go', '.rs', 
             else:
                 # Check if file has relevant extension
                 if any(file_content.path.endswith(ext) for ext in extensions):
-                    if file_content.size < 100000:  # Only files under 100KB
+                    if file_content.size < 50000:  # Reduced to 50KB max per file
                         files_to_process.append(file_content)
         
         # Prioritize important files
@@ -144,7 +144,7 @@ def get_key_files(repo, extensions=['.py', '.js', '.ts', '.java', '.go', '.rs', 
         files_to_process.sort(key=file_priority)
         
         # Process files up to limit
-        for file_content in files_to_process[:15]:  # Increased to 15 files
+        for file_content in files_to_process[:10]:  # Reduced to 10 files
             try:
                 content = file_content.decoded_content.decode('utf-8')
                 key_files.append({
@@ -155,7 +155,7 @@ def get_key_files(repo, extensions=['.py', '.js', '.ts', '.java', '.go', '.rs', 
             except Exception as e:
                 logger.warning(f"Could not read file {file_content.path}: {str(e)}")
                 
-            if len(key_files) >= 15:
+            if len(key_files) >= 10:
                 break
     
     except Exception as e:
@@ -172,20 +172,20 @@ def analyze_codebase(repo_full_name: str, analysis_type: str = "general") -> dic
         
         # Get repository structure
         structure = get_repository_structure(repo)
-        structure_text = "\n".join(structure[:100])  # Limit structure output
+        structure_text = "\n".join(structure[:50])  # Reduced to 50 items
         
         # Get key files
         key_files = get_key_files(repo)
         files_text = "\n\n".join([
-            f"=== {f['path']} ===\n{f['content'][:2000]}"  # Limit each file to 2000 chars
-            for f in key_files
+            f"=== {f['path']} ===\n{f['content'][:1000]}"  # Reduced to 1000 chars per file
+            for f in key_files[:10]  # Reduced to 10 files max
         ])
         
         # Get README
         readme_content = ""
         try:
             readme = repo.get_readme()
-            readme_content = readme.decoded_content.decode('utf-8')[:2000]
+            readme_content = readme.decoded_content.decode('utf-8')[:1000]  # Reduced to 1000 chars
         except:
             pass
         
@@ -216,10 +216,12 @@ Task: {prompts.get(analysis_type, prompts['general'])}
 
 Provide a detailed, actionable analysis."""
 
-        # Try multiple models in order of preference
+        # Try multiple models in order of preference (all currently active as of Oct 2025)
         models = [
-            ("llama-3.3-70b-versatile", 8000),
-            ("llama-3.1-8b-instant", 8000)
+            ("llama-3.3-70b-versatile", 4000),      # Primary - best quality, reduced tokens
+            ("qwen/qwen3-32b", 6000),                # Large context fallback
+            ("gemma2-9b-it", 4000),                  # Google's efficient model
+            ("llama-3.1-8b-instant", 4000)           # Fast fallback, reduced tokens
         ]
         
         analysis = None
