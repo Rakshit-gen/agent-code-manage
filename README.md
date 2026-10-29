@@ -1,186 +1,93 @@
-# Codebase Analysis Agent
+# agent-code-manage
 
-AI-powered codebase analyzer using Groq (Llama 3.3 70B) and GitHub API with FastAPI. No Redis required - completely stateless service.
+Give it a GitHub repository and it writes a review of the whole codebase: a general overview, or a focused report on security, architecture, code quality or performance.
 
-## Features
+It is a small FastAPI service with no database. One request in, one Markdown report out. The [code-bot](https://github.com/Rakshit-gen/code-bot) UI uses it for its "analyze a repository" page; [agent-prm](https://github.com/Rakshit-gen/agent-prm) is the sibling service that reviews single pull requests.
 
-- **Multiple Analysis Types**: General, Security, Architecture, Code Quality, Performance
-- **GitHub Integration**: Webhook support for automated analysis on push
-- **Stateless Design**: No database or Redis needed
-- **FastAPI**: High-performance async API with automatic OpenAPI docs
-- **Groq LLM**: Lightning-fast inference with Llama 3.3 70B
+## How it works
 
-## Setup
+For each `POST /analyze`:
 
-### 1. Environment Variables
+1. **Read the repo through the GitHub API.**
+   - Repo metadata: description, stars, main language, default branch.
+   - A file tree three levels deep (the first 100 entries go into the prompt).
+   - Up to 50 source files under 100 KB, found breadth-first. Sixteen languages are recognised by extension (`.py`, `.ts`, `.go`, `.rs`, `.java` and so on).
+   - Those files are sorted so entry points come first (`main.`, `app.`, `index.`, `server.`), then routes, controllers, models, services, components. The top 15 are read, 2,000 characters each.
+   - The README, first 2,000 characters.
+2. **Build one prompt** from all of that plus a template for the chosen report type. Each template asks for fixed sections, for example the security one asks for critical vulnerabilities, auth, data protection, API security, dependencies and recommendations.
+3. **Call Groq.** It tries `llama-3.3-70b-versatile` first. If Groq says rate limited, it moves down a list of smaller models. Any other error stops right away.
+4. **Return** the report text with the repo name, report type, number of files read, stars and language.
 
-Create a `.env` file in the project root:
+## Quickstart
 
-```bash
-GROQ_API_KEY=gsk_your_actual_groq_api_key_here
-GITHUB_TOKEN=ghp_your_actual_github_token_here
-PORT=8000
-```
-
-**Get API Keys:**
-- Groq API: https://console.groq.com/keys (Sign up for free)
-- GitHub Token: https://github.com/settings/tokens (Create personal access token with `repo` scope)
-
-### 2. Install Dependencies
+You need Python 3.11+, a [Groq API key](https://console.groq.com/keys) and a [GitHub token](https://github.com/settings/tokens). Both keys are required; the service will not start without them.
 
 ```bash
+git clone https://github.com/Rakshit-gen/agent-code-manage.git
+cd agent-code-manage
 pip install -r requirements.txt
+cat > .env <<'EOF'
+GROQ_API_KEY=gsk_...
+GITHUB_TOKEN=ghp_...
+EOF
+uvicorn main:app --reload
 ```
 
-### 3. Run Locally
-
-```bash
-python main.py
-```
-
-### 4. Deploy to Render
-
-1. Create new Web Service on Render
-2. Connect your GitHub repository
-3. Set environment variables in Render dashboard:
-   - `GROQ_API_KEY`
-   - `GITHUB_TOKEN`
-   - `PORT=8000`
-4. Build command: `pip install -r requirements.txt`
-5. Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
-
-## API Endpoints
-
-### Interactive API Docs
-
-FastAPI provides automatic interactive documentation:
-- **Swagger UI**: http://localhost:8000/docs
-- **ReDoc**: http://localhost:8000/redoc
-
-### Analyze Repository
-
-```bash
-POST /analyze
-Content-Type: application/json
-
-{
-  "repository": "owner/repo-name",
-  "type": "general"
-}
-```
-
-**Repository formats supported:**
-- `owner/repo` (e.g., `facebook/react`)
-- `https://github.com/owner/repo`
-- `https://www.github.com/owner/repo`
-
-**Analysis Types:**
-- `general` - Comprehensive overview
-- `security` - Security vulnerabilities and best practices
-- `architecture` - Design patterns and structure
-- `quality` - Code quality and maintainability
-- `performance` - Performance bottlenecks and optimization
-
-**Example:**
+Then:
 
 ```bash
 curl -X POST http://localhost:8000/analyze \
   -H "Content-Type: application/json" \
-  -d '{
-    "repository": "facebook/react",
-    "type": "architecture"
-  }'
+  -d '{"repository": "facebook/react", "type": "architecture"}'
 ```
 
-Or use the interactive docs at `/docs` for easy testing!
+`repository` takes `owner/repo` or a full GitHub URL. `type` is one of `general` (default), `security`, `architecture`, `quality`, `performance`.
 
-### Health Check
+Interactive docs are at `/docs`.
 
-```bash
-GET /health
-```
+## Configuration
 
-### GitHub Webhook
+| Variable | Required | What it does |
+|---|---|---|
+| `GROQ_API_KEY` | yes | Groq key |
+| `GITHUB_TOKEN` | yes | Reads repo contents. Give it `repo` scope if you want private repos |
+| `PORT` | no | Only used by `python main.py`, default 8000 |
 
-```bash
-POST /webhook
-```
+## API
 
-Set up webhook in GitHub repository settings:
-- Payload URL: `https://your-service.onrender.com/webhook`
-- Content type: `application/json`
-- Events: Push events
+| Method | Path | What it does |
+|---|---|---|
+| `POST` | `/analyze` | Runs a review and returns it. Takes 10 to 60 seconds depending on repo size and Groq load |
+| `POST` | `/webhook` | GitHub push webhook. A push to `main` or `master` starts a general review in the background |
+| `GET` | `/health` | Says whether both keys are set |
+| `GET` | `/` | Service info and supported report types |
 
-## Response Format
+Response:
 
 ```json
 {
   "success": true,
-  "repository": "owner/repo",
-  "analysis_type": "general",
-  "analysis": "Detailed analysis text...",
-  "files_analyzed": 10,
-  "stars": 12500,
-  "language": "Python"
+  "repository": "facebook/react",
+  "analysis_type": "architecture",
+  "analysis": "## System Design\n...",
+  "files_analyzed": 15,
+  "stars": 230000,
+  "language": "JavaScript",
+  "metadata": {"default_branch": "main"}
 }
 ```
 
-## Key Features
+## Deploy on Render
 
-- **Fast Analysis**: Groq provides blazing-fast inference speeds
-- **Multiple Model Fallbacks**: Automatically tries alternative models if rate limited
-  - Primary: Llama 3.3 70B Versatile (best quality, latest model)
-  - Fallback 1: Qwen3 32B (large 32K context window)
-  - Fallback 2: Gemma2 9B IT (Google's efficient model)
-  - Fallback 3: Llama 3.1 8B Instant (fastest, lower token usage)
-- **Deep Directory Exploration**: Recursively analyzes all folders including:
-  - `app/` folders (Next.js)
-  - `src/` directories
-  - `components/` folders
-  - `pages/`, `api/`, `lib/`, etc.
-- **README Priority**: Always includes README.md as the first file analyzed
-- **Smart File Prioritization**: Focuses on important files first (main, index, routes, components)
-- **Flexible Repository Input**: Accepts both `owner/repo` format and full GitHub URLs
-- **Async Operations**: FastAPI's async support for better performance
-- **Auto Documentation**: Interactive API docs at `/docs` and `/redoc`
-- Analyzes up to 10 key source files across all directories (README + 9 other files)
-- Reads repository structure up to 3 levels deep (50 items max)
-- Includes README content (first 1000 chars)
-- Each file limited to 1000 characters in analysis
-- Files over 50KB are skipped to avoid token limits
-- Supports 12+ programming languages
-- Automatic webhook-based analysis
+- Build command: `pip install -r requirements.txt`
+- Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+- Set `GROQ_API_KEY` and `GITHUB_TOKEN` in the dashboard.
 
-## Error Handling
+## Limits
 
-All errors return appropriate HTTP status codes with error messages:
-
-```json
-{
-  "success": false,
-  "error": "Error description"
-}
-```
-
-## Notes
-
-- **Deep Folder Analysis**: The service recursively explores ALL directories including:
-  - Next.js: `app/`, `pages/`, `components/`, `lib/`, `public/`
-  - React: `src/`, `components/`, `hooks/`, `utils/`
-  - Backend: `api/`, `routes/`, `controllers/`, `models/`, `services/`
-  - Any nested structure is automatically explored
-- **Smart Prioritization**: Files are analyzed in order of importance:
-  1. Main entry points (main.*, app.*, index.*)
-  2. API routes and controllers
-  3. Components and pages
-  4. Configuration files
-  5. Other source files
-- **Rate Limits**: The service automatically falls back to faster models if you hit Groq's rate limits
-- **Token Optimization**: Request size optimized to stay within free tier limits (6000 TPM)
-- **Free Tier**: Groq offers generous free tier - upgrade for more at https://console.groq.com/settings/billing
-- Files over 50KB are skipped to avoid token limits
-- Maximum 10 files analyzed per request
-- Each file limited to 1000 characters in analysis
-- README limited to 1000 characters
-- Repository structure limited to 50 items
-- Works with public repositories (private repos need appropriate GitHub token permissions)
+- It sees at most 15 files and 2,000 characters of each. On a big repo the report describes a sample, not the whole thing.
+- One request makes one LLM call per report, and many GitHub API calls to walk the tree. Large repos can hit GitHub's rate limit.
+- The webhook does not check GitHub's signature, and the report it produces is only logged, not stored or posted anywhere.
+- There is no auth or rate limiting on `/analyze`.
+- `docker-compose.yml` and the files under `tests/` came over from agent-prm and still reference Redis and a rate limiter that this service does not have. Use `uvicorn` directly for now.
+- Some fallback model names in the list have since been retired by Groq. When they fail with something other than a rate limit, the loop stops.
